@@ -324,6 +324,7 @@ var localStateBackup=null;
 var userId=state.userId||genId();
 var roomMembers={};
 var explodedAnimShown=loadExploded();
+var roomJoinedAt=0;
 state.userId=userId;
 
 /* ===== Utility ===== */
@@ -484,11 +485,14 @@ function subscribeToRoom(rid){
         render();
       }else if(payload.type==='request_sync'){
         updateMember(payload.sid,payload.sn,0);
-        publishFullState();
+        /* Only respond if we have data AND have been in room long enough for cache replay to finish */
+        if(state.categories.length>0&&Date.now()-roomJoinedAt>5000){
+          publishFullState();
+        }
         renderLeaderboard();
       }else if(payload.type==='member_join'){
         updateMember(payload.sid,payload.sn,0);
-        publishFullState();
+        /* Do NOT auto-publish state here; the joiner will request sync explicitly */
         renderLeaderboard();
       }
     }catch(err){}
@@ -498,7 +502,7 @@ function subscribeToRoom(rid){
     document.getElementById('roomStatus').className='room-status online';
     setTimeout(function(){
       if(!receivedState&&currentRoomId){requestSync()}
-    },2500);
+    },2000);
   });
 
   eventSource.onerror=function(){
@@ -526,6 +530,7 @@ function createRoom(){
   var rid=genRoomId();
   currentRoomId=rid;
   isRoomMode=true;
+  roomJoinedAt=Date.now();
   localStateBackup=JSON.parse(JSON.stringify(state));
   roomMembers={};
   updateMember(userId,state.userName,calcBombCount());
@@ -825,6 +830,7 @@ function checkUrlRoom(){
 
 function enterRoom(rid){
   currentRoomId=rid;isRoomMode=true;
+  roomJoinedAt=Date.now();
   localStateBackup=JSON.parse(JSON.stringify(state));
   roomMembers={};updateMember(userId,state.userName,0);
   /* Restore persisted room data; if none, clear personal data to avoid leaking into room */
@@ -838,11 +844,9 @@ function enterRoom(rid){
   }
   subscribeToRoom(rid);
   saveRoomMeta();
-  setTimeout(function(){
-    publishMemberJoin();
-    /* If we have cached data (e.g. creator refresh or rejoin), broadcast it */
-    if(state.categories.length>0)publishFullState();
-  },1000);
+  /* Joiner only announces presence; NEVER publishes state here
+     to avoid broadcasting incomplete data from partially-replayed cache */
+  setTimeout(function(){publishMemberJoin()},1000);
   renderRoomUI();
 }
 
