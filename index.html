@@ -455,9 +455,44 @@ function requestSync(){
   });
 }
 
+/* Fetch latest state via HTTP poll (primary sync mechanism, more reliable than SSE cache) */
+function fetchLatestState(rid){
+  var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/json?poll=1&since=12h';
+  console.log('[sync] fetchLatestState from:',url);
+  return fetch(url).then(function(res){return res.text()}).then(function(text){
+    if(!text||!text.trim()){console.log('[sync] no cached messages');return false}
+    var lines=text.trim().split('\n');
+    var best=null;var bestTs=0;
+    console.log('[sync] fetched',lines.length,'cached messages');
+    for(var i=0;i<lines.length;i++){
+      try{
+        var msg=JSON.parse(lines[i]);
+        if(msg.event!=='message'||!msg.message)continue;
+        var p=JSON.parse(msg.message);
+        /* Accept ANY state_update (including own) — essential for rejoin after refresh */
+        if(p.type==='state_update'&&p.cats&&p.cats.length>0){
+          var ts=p.ts||msg.time*1000||0;
+          if(ts>=bestTs){best=p;bestTs=ts}
+        }
+      }catch(e){}
+    }
+    if(best){
+      console.log('[sync] found state from',best.sn,'with',best.cats.length,'categories, ts=',bestTs);
+      state.categories=best.cats;
+      saveRoomState();
+      if(!state.selectedCategoryId&&state.categories.length>0)state.selectedCategoryId=state.categories[0].id;
+      if(best.sid!==userId)updateMember(best.sid,best.sn,calcBombCountFrom(best.cats));
+      render();
+      return true;
+    }
+    console.log('[sync] no valid state_update found in cache');
+    return false;
+  }).catch(function(err){console.log('[sync] fetchLatestState error:',err);return false});
+}
+
 function subscribeToRoom(rid){
   if(eventSource){eventSource.close();eventSource=null}
-  var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/sse?since=12h&poll=0';
+  var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/sse?since=12h';
   var receivedState=false;
 
   try{
@@ -485,8 +520,10 @@ function subscribeToRoom(rid){
         render();
       }else if(payload.type==='request_sync'){
         updateMember(payload.sid,payload.sn,0);
-        /* Only respond if we have data AND have been in room long enough for cache replay to finish */
-        if(state.categories.length>0&&Date.now()-roomJoinedAt>5000){
+        /* Respond with our state if we have data. Guard: only respond after being in room 3s
+           to avoid responding with stale/empty data right after joining */
+        if(state.categories.length>0&&Date.now()-roomJoinedAt>3000){
+          console.log('[sync] responding to request_sync from',payload.sn);
           publishFullState();
         }
         renderLeaderboard();
@@ -500,9 +537,8 @@ function subscribeToRoom(rid){
 
   eventSource.addEventListener('open',function(){
     document.getElementById('roomStatus').className='room-status online';
-    setTimeout(function(){
-      if(!receivedState&&currentRoomId){requestSync()}
-    },2000);
+    console.log('[sse] connection opened');
+    /* requestSync is now handled by enterRoom via fetchLatestState fallback */
   });
 
   eventSource.onerror=function(){
@@ -537,7 +573,9 @@ function createRoom(){
   subscribeToRoom(rid);
   saveRoomMeta();
   saveRoomState();
-  setTimeout(publishFullState,800);
+  /* Publish state immediately AND after a delay to ensure ntfy caches it */
+  publishFullState();
+  setTimeout(publishFullState,1500);
   showToast('\uD83C\uDF89 \u623F\u95F4\u5DF2\u521B\u5EFA\uFF01\u5206\u4EAB\u623F\u95F4\u53F7\u7ED9\u670B\u53CB');
   renderRoomUI();
 }
@@ -833,7 +871,7 @@ function enterRoom(rid){
   roomJoinedAt=Date.now();
   localStateBackup=JSON.parse(JSON.stringify(state));
   roomMembers={};updateMember(userId,state.userName,0);
-  /* Restore persisted room data; if none, clear personal data to avoid leaking into room */
+  /* Restore persisted room data first (instant, from localStorage) */
   var saved=loadRoomState(rid);
   if(saved&&saved.length>0){
     state.categories=saved;
@@ -842,12 +880,29 @@ function enterRoom(rid){
     state.categories=[];
     state.selectedCategoryId=null;
   }
+  /* Start SSE for real-time updates going forward */
   subscribeToRoom(rid);
   saveRoomMeta();
-  /* Joiner only announces presence; NEVER publishes state here
-     to avoid broadcasting incomplete data from partially-replayed cache */
-  setTimeout(function(){publishMemberJoin()},1000);
   renderRoomUI();
+  render();
+  /* PRIMARY SYNC: fetch latest state via HTTP poll (most reliable) */
+  fetchLatestState(rid).then(function(found){
+    console.log('[sync] fetchLatestState result:',found);
+    if(!found&&state.categories.length===0){
+      /* No state from fetch AND no localStorage — ask other members */
+      console.log('[sync] no state found, requesting sync from members');
+      requestSync();
+      /* Retry once more after 3 seconds */
+      setTimeout(function(){
+        if(state.categories.length===0&&currentRoomId===rid){
+          console.log('[sync] still no state, retrying requestSync');
+          requestSync();
+        }
+      },3000);
+    }
+    /* Announce presence AFTER sync attempt */
+    publishMemberJoin();
+  });
 }
 
 /* ===== Init ===== */
@@ -855,10 +910,11 @@ checkUrlRoom();
 render();
 startCountdown();
 
-/* Periodic sync heartbeat: re-request sync every 30s if in room mode */
+/* Periodic sync heartbeat: re-fetch + re-request sync every 30s if in room mode */
 setInterval(function(){
-  if(isRoomMode&&currentRoomId&&eventSource){
-    requestSync();
+  if(isRoomMode&&currentRoomId){
+    fetchLatestState(currentRoomId);
+    if(eventSource)requestSync();
   }
 },30000);
 </script>
