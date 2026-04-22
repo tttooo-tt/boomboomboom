@@ -342,6 +342,15 @@ function loadExploded(){
 }
 function saveExploded(){localStorage.setItem(EXPLODED_KEY,JSON.stringify(explodedAnimShown))}
 
+/* ===== Room Persistence ===== */
+var ROOM_STATE_PREFIX='bombTodo_room_';
+var ROOM_META_KEY='bombTodo_roomMeta';
+function saveRoomState(){if(currentRoomId)localStorage.setItem(ROOM_STATE_PREFIX+currentRoomId,JSON.stringify(state.categories))}
+function loadRoomState(rid){try{var d=JSON.parse(localStorage.getItem(ROOM_STATE_PREFIX+rid));if(Array.isArray(d))return d}catch(e){}return null}
+function saveRoomMeta(){localStorage.setItem(ROOM_META_KEY,JSON.stringify({roomId:currentRoomId,userName:state.userName}))}
+function loadRoomMeta(){try{return JSON.parse(localStorage.getItem(ROOM_META_KEY))}catch(e){return null}}
+function clearRoomMeta(){localStorage.removeItem(ROOM_META_KEY)}
+
 function showToast(msg){
   var t=document.getElementById('toast');t.textContent=msg;
   t.classList.add('show');setTimeout(function(){t.classList.remove('show')},2500);
@@ -417,6 +426,7 @@ function publishToRoom(payload){
 }
 
 function publishFullState(){
+  saveRoomState();
   publishToRoom({
     type:'state_update',
     sid:userId,
@@ -465,6 +475,7 @@ function subscribeToRoom(rid){
 
       if(payload.type==='state_update'){
         state.categories=payload.cats||[];
+        saveRoomState();
         if(!state.selectedCategoryId&&state.categories.length>0){
           state.selectedCategoryId=state.categories[0].id;
         }
@@ -519,6 +530,8 @@ function createRoom(){
   roomMembers={};
   updateMember(userId,state.userName,calcBombCount());
   subscribeToRoom(rid);
+  saveRoomMeta();
+  saveRoomState();
   setTimeout(publishFullState,800);
   showToast('\uD83C\uDF89 \u623F\u95F4\u5DF2\u521B\u5EFA\uFF01\u5206\u4EAB\u623F\u95F4\u53F7\u7ED9\u670B\u53CB');
   renderRoomUI();
@@ -535,6 +548,7 @@ function joinRoomFromInput(){
   roomMembers={};
   updateMember(userId,state.userName,0);
   subscribeToRoom(rid);
+  saveRoomMeta();
   setTimeout(function(){publishMemberJoin()},1000);
   input.value='';
   showToast('\uD83D\uDCA3 \u5DF2\u52A0\u5165\u623F\u95F4 '+rid);
@@ -543,6 +557,8 @@ function joinRoomFromInput(){
 
 function leaveRoom(){
   if(eventSource){eventSource.close();eventSource=null}
+  clearRoomMeta();
+  if(currentRoomId)localStorage.removeItem(ROOM_STATE_PREFIX+currentRoomId);
   currentRoomId=null;isRoomMode=false;roomMembers={};
   if(localStateBackup){
     state.categories=localStateBackup.categories;
@@ -748,6 +764,7 @@ function handleNameSubmit(e){
     localStateBackup=JSON.parse(JSON.stringify(state));
     roomMembers={};updateMember(userId,name,0);
     subscribeToRoom(window._pendingRoom);
+    saveRoomMeta();
     setTimeout(function(){publishMemberJoin()},1000);
     renderRoomUI();
     showToast('\uD83D\uDCA3 \u5DF2\u52A0\u5165\u623F\u95F4');
@@ -802,22 +819,38 @@ document.querySelectorAll('.modal-overlay').forEach(function(el){
   el.addEventListener('click',function(e){if(e.target===el)closeModal(el.id)});
 });
 
-/* ===== URL Room Auto-Join ===== */
+/* ===== URL Room Auto-Join & Rejoin ===== */
 function checkUrlRoom(){
   var hash=window.location.hash;
   var match=hash.match(/room=([A-Z0-9]+)/i);
   if(match){
     var rid=match[1].toUpperCase();
     if(!state.userName){openModal('nameModal');window._pendingAction='join';window._pendingRoom=rid}
-    else{
-      currentRoomId=rid;isRoomMode=true;
-      localStateBackup=JSON.parse(JSON.stringify(state));
-      roomMembers={};updateMember(userId,state.userName,0);
-      subscribeToRoom(rid);
-      setTimeout(function(){publishMemberJoin()},1000);
-      renderRoomUI();
-    }
+    else{enterRoom(rid)}
+    return;
   }
+  /* No URL hash — check if user was previously in a room */
+  var meta=loadRoomMeta();
+  if(meta&&meta.roomId){
+    if(meta.userName)state.userName=meta.userName;
+    enterRoom(meta.roomId);
+  }
+}
+
+function enterRoom(rid){
+  currentRoomId=rid;isRoomMode=true;
+  localStateBackup=JSON.parse(JSON.stringify(state));
+  roomMembers={};updateMember(userId,state.userName,0);
+  /* Restore persisted room data first */
+  var saved=loadRoomState(rid);
+  if(saved&&saved.length>0){
+    state.categories=saved;
+    if(!state.selectedCategoryId&&state.categories.length>0)state.selectedCategoryId=state.categories[0].id;
+  }
+  subscribeToRoom(rid);
+  saveRoomMeta();
+  setTimeout(function(){publishMemberJoin()},1000);
+  renderRoomUI();
 }
 
 /* ===== Init ===== */
