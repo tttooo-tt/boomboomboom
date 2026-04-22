@@ -325,6 +325,7 @@ var userId=state.userId||genId();
 var roomMembers={};
 var explodedAnimShown=loadExploded();
 var roomJoinedAt=0;
+var stateVersion=0;
 state.userId=userId;
 
 /* ===== Utility ===== */
@@ -336,7 +337,7 @@ function loadData(){
   try{var d=JSON.parse(localStorage.getItem(STORAGE_KEY));if(d&&d.categories)return d}catch(e){}
   return{categories:[],selectedCategoryId:null,userName:'',userId:''}
 }
-function saveData(){state.userId=userId;localStorage.setItem(STORAGE_KEY,JSON.stringify(state))}
+function saveData(){stateVersion++;state.userId=userId;localStorage.setItem(STORAGE_KEY,JSON.stringify(state))}
 
 function loadExploded(){
   try{return JSON.parse(localStorage.getItem(EXPLODED_KEY)||'{}')}catch(e){return{}}
@@ -427,6 +428,7 @@ function publishToRoom(payload){
 }
 
 function publishFullState(){
+  stateVersion++;
   saveRoomState();
   publishToRoom({
     type:'state_update',
@@ -458,7 +460,8 @@ function requestSync(){
 /* Fetch latest state via HTTP poll (primary sync mechanism, more reliable than SSE cache) */
 function fetchLatestState(rid){
   var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/json?poll=1&since=12h';
-  console.log('[sync] fetchLatestState from:',url);
+  var verBefore=stateVersion;
+  console.log('[sync] fetchLatestState from:',url,'ver=',verBefore);
   return fetch(url).then(function(res){return res.text()}).then(function(text){
     if(!text||!text.trim()){console.log('[sync] no cached messages');return false}
     var lines=text.trim().split('\n');
@@ -477,6 +480,11 @@ function fetchLatestState(rid){
       }catch(e){}
     }
     if(best){
+      /* CRITICAL: if user made local changes while fetch was in-flight, do NOT overwrite */
+      if(stateVersion!==verBefore){
+        console.log('[sync] local state changed during fetch (ver '+verBefore+'->'+stateVersion+'), skipping overwrite');
+        return false;
+      }
       console.log('[sync] found state from',best.sn,'with',best.cats.length,'categories, ts=',bestTs);
       state.categories=best.cats;
       saveRoomState();
