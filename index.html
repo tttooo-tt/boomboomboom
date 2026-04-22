@@ -456,7 +456,7 @@ function requestSync(){
 
 function subscribeToRoom(rid){
   if(eventSource){eventSource.close();eventSource=null}
-  var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/sse?since=30m';
+  var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/sse?since=12h&poll=0';
   var receivedState=false;
 
   try{
@@ -542,17 +542,9 @@ function joinRoomFromInput(){
   var rid=input.value.trim().toUpperCase();
   if(!rid){showToast('\u8BF7\u8F93\u5165\u623F\u95F4\u53F7');return}
   if(!state.userName){openModal('nameModal');window._pendingAction='join';window._pendingRoom=rid;return}
-  currentRoomId=rid;
-  isRoomMode=true;
-  localStateBackup=JSON.parse(JSON.stringify(state));
-  roomMembers={};
-  updateMember(userId,state.userName,0);
-  subscribeToRoom(rid);
-  saveRoomMeta();
-  setTimeout(function(){publishMemberJoin()},1000);
   input.value='';
+  enterRoom(rid);
   showToast('\uD83D\uDCA3 \u5DF2\u52A0\u5165\u623F\u95F4 '+rid);
-  renderRoomUI();
 }
 
 function leaveRoom(){
@@ -760,13 +752,7 @@ function handleNameSubmit(e){
   if(window._pendingAction==='create'){window._pendingAction=null;createRoom()}
   else if(window._pendingAction==='join'){
     window._pendingAction=null;
-    currentRoomId=window._pendingRoom;isRoomMode=true;
-    localStateBackup=JSON.parse(JSON.stringify(state));
-    roomMembers={};updateMember(userId,name,0);
-    subscribeToRoom(window._pendingRoom);
-    saveRoomMeta();
-    setTimeout(function(){publishMemberJoin()},1000);
-    renderRoomUI();
+    enterRoom(window._pendingRoom);
     showToast('\uD83D\uDCA3 \u5DF2\u52A0\u5165\u623F\u95F4');
   }
   return false;
@@ -841,15 +827,22 @@ function enterRoom(rid){
   currentRoomId=rid;isRoomMode=true;
   localStateBackup=JSON.parse(JSON.stringify(state));
   roomMembers={};updateMember(userId,state.userName,0);
-  /* Restore persisted room data first */
+  /* Restore persisted room data; if none, clear personal data to avoid leaking into room */
   var saved=loadRoomState(rid);
   if(saved&&saved.length>0){
     state.categories=saved;
     if(!state.selectedCategoryId&&state.categories.length>0)state.selectedCategoryId=state.categories[0].id;
+  }else{
+    state.categories=[];
+    state.selectedCategoryId=null;
   }
   subscribeToRoom(rid);
   saveRoomMeta();
-  setTimeout(function(){publishMemberJoin()},1000);
+  setTimeout(function(){
+    publishMemberJoin();
+    /* If we have cached data (e.g. creator refresh or rejoin), broadcast it */
+    if(state.categories.length>0)publishFullState();
+  },1000);
   renderRoomUI();
 }
 
@@ -857,6 +850,13 @@ function enterRoom(rid){
 checkUrlRoom();
 render();
 startCountdown();
+
+/* Periodic sync heartbeat: re-request sync every 30s if in room mode */
+setInterval(function(){
+  if(isRoomMode&&currentRoomId&&eventSource){
+    requestSync();
+  }
+},30000);
 </script>
 </body>
 </html>
