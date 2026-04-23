@@ -361,6 +361,13 @@ function getSelectedCategory(){
   if(!state.selectedCategoryId&&state.categories.length>0)state.selectedCategoryId=state.categories[0].id;
   return state.categories.find(function(c){return c.id===state.selectedCategoryId})||null;
 }
+/* Validate selectedCategoryId matches an actual category — call after every state.categories change */
+function validateSelectedCategory(){
+  if(state.categories.length===0){state.selectedCategoryId=null;return}
+  if(!state.categories.find(function(c){return c.id===state.selectedCategoryId})){
+    state.selectedCategoryId=state.categories[0].id;
+  }
+}
 
 /* ===== Time ===== */
 function getTimeStatus(item){
@@ -485,10 +492,15 @@ function fetchLatestState(rid){
         console.log('[sync] local state changed during fetch (ver '+verBefore+'->'+stateVersion+'), skipping overwrite');
         return false;
       }
+      /* Check room hasn't changed (user might have left/switched rooms) */
+      if(currentRoomId!==rid){
+        console.log('[sync] room changed during fetch, skipping');
+        return false;
+      }
       console.log('[sync] found state from',best.sn,'with',best.cats.length,'categories, ts=',bestTs);
       state.categories=best.cats;
       saveRoomState();
-      if(!state.selectedCategoryId&&state.categories.length>0)state.selectedCategoryId=state.categories[0].id;
+      validateSelectedCategory();
       if(best.sid!==userId)updateMember(best.sid,best.sn,calcBombCountFrom(best.cats));
       render();
       return true;
@@ -500,7 +512,9 @@ function fetchLatestState(rid){
 
 function subscribeToRoom(rid){
   if(eventSource){eventSource.close();eventSource=null}
-  var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/sse?since=12h';
+  /* NO since=12h: SSE only receives NEW messages. Initial state comes from fetchLatestState. 
+     This prevents SSE replay from overwriting data (own messages get filtered, friend's old messages get applied) */
+  var url=NTFY_BASE+'/'+getNtfyTopic(rid)+'/sse';
   var receivedState=false;
 
   try{
@@ -520,9 +534,7 @@ function subscribeToRoom(rid){
       if(payload.type==='state_update'){
         state.categories=payload.cats||[];
         saveRoomState();
-        if(!state.selectedCategoryId&&state.categories.length>0){
-          state.selectedCategoryId=state.categories[0].id;
-        }
+        validateSelectedCategory();
         updateMember(payload.sid,payload.sn,calcBombCountFrom(payload.cats));
         receivedState=true;
         render();
@@ -883,11 +895,10 @@ function enterRoom(rid){
   var saved=loadRoomState(rid);
   if(saved&&saved.length>0){
     state.categories=saved;
-    if(!state.selectedCategoryId&&state.categories.length>0)state.selectedCategoryId=state.categories[0].id;
   }else{
     state.categories=[];
-    state.selectedCategoryId=null;
   }
+  validateSelectedCategory();
   /* Start SSE for real-time updates going forward */
   subscribeToRoom(rid);
   saveRoomMeta();
@@ -918,11 +929,10 @@ checkUrlRoom();
 render();
 startCountdown();
 
-/* Periodic sync heartbeat: re-fetch + re-request sync every 30s if in room mode */
+/* Periodic sync heartbeat: request sync from peers every 30s (NO fetch — avoids race conditions) */
 setInterval(function(){
-  if(isRoomMode&&currentRoomId){
-    fetchLatestState(currentRoomId);
-    if(eventSource)requestSync();
+  if(isRoomMode&&currentRoomId&&eventSource){
+    requestSync();
   }
 },30000);
 </script>
